@@ -31,6 +31,24 @@ for (file in files) {
 ```{r}
 library(ggplot2)
 
+
+library(stringr)
+getwd()
+files <- list.files("infoviz", full.names = TRUE)
+
+for (file in files) {
+  if (file.exists(file)) {
+    text <- readLines(file, warn = FALSE)
+    word_count <- sum(str_count(text, "\\w+"))
+    print(paste(file, word_count, "words"))
+  } else {
+    print(paste("File missing:", file))
+  }
+}
+
+
+
+
 edition_data <- data.frame(
   Edition = c(1813, 2002),
   WordCount = c(123669, 122835)
@@ -59,6 +77,21 @@ library(dplyr)
 library(wordcloud2)
 library(treemapify)
 library(diffobj)
+
+
+getwd()
+files <- list.files("infoviz", full.names = TRUE)
+
+for (file in files) {
+  if (file.exists(file)) {
+    text <- readLines(file, warn = FALSE)
+    word_count <- sum(str_count(text, "\\w+"))
+    print(paste(file, word_count, "words"))
+  } else {
+    print(paste("File missing:", file))
+  }
+}
+
 
 edition_data <- data.frame(
   Edition = c("1813", "2002"),
@@ -107,7 +140,7 @@ ui <- fluidPage(
       selectInput("flow_edition", "Edition for Word Flow:",
                   choices = edition_data$Edition,
                   selected = "1813"),
-      textInput("search_word", "Enter a word to search:", value = "Elizabeth"),
+      textInput("search_word", "Enter a word to search:", value = "Bennet"),
       actionButton("run_search", "Search Word Count"),
       actionButton("run_context", "Render Word Context"),
       actionButton("run_cloud", "Render Word Cloud"),
@@ -205,10 +238,9 @@ server <- function(input, output) {
     results
   }) # search results tab
 
-  # word cloud tab
-  combined_context <- reactiveVal(data.frame())
-
-  observeEvent(input$run_cloud, {
+  # word cloud tab - now reactive and dynamic
+  combined_context <- reactive({
+    # This will automatically update when any of these inputs change
     search_term <- tolower(input$search_word)
     combined <- data.frame(Word = character(), Freq = numeric(), stringsAsFactors = FALSE)
 
@@ -234,11 +266,15 @@ server <- function(input, output) {
       }
     }
 
-    summarized <- combined %>% 
-      group_by(Word) %>% 
-      summarise(Freq = sum(Freq), .groups = 'drop') %>%
-      arrange(desc(Freq))
-    combined_context(summarized)
+    if(nrow(combined) > 0) {
+      summarized <- combined %>% 
+        group_by(Word) %>% 
+        summarise(Freq = sum(Freq), .groups = 'drop') %>%
+        arrange(desc(Freq))
+      return(summarized)
+    } else {
+      return(data.frame())
+    }
   })
   
 
@@ -247,11 +283,60 @@ server <- function(input, output) {
     if (nrow(data) == 0) return(NULL)
     wordcloud2(data)
   })
+  
+  # Keep the button for manual refresh if needed
+  observeEvent(input$run_cloud, {
+    # Clear and regenerate the word cloud
+    output$word_cloud <- renderWordcloud2({
+      # Small delay to show clearing effect
+      Sys.sleep(0.1)
+      
+      data <- combined_context()
+      if (nrow(data) == 0) return(NULL)
+      wordcloud2(data)
+    })
+  })
 # word cloud tab
   
-# treemap rab  
+# # treemap tab 
+#   output$chapter_treemap <- renderPlot({
+#     # This will automatically update when treemap_edition changes
+#     edition <- input$treemap_edition
+#     file_path <- paste0("infoviz/", edition, ".txt")
+
+#     if (!file.exists(file_path)) return(NULL)
+
+#     lines <- readLines(file_path, warn = FALSE)
+#     chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+#     chapter_wordcounts <- data.frame(Chapter = character(), Words = numeric(), stringsAsFactors = FALSE)
+
+#     for (i in seq_along(chapter_lines)) {
+#       start_line <- chapter_lines[i]
+#       end_line <- if (i < length(chapter_lines)) chapter_lines[i + 1] - 1 else length(lines)
+#       text <- paste(lines[start_line:end_line], collapse = " ")
+#       count <- str_count(text, "\\w+")
+#       chapter_wordcounts <- rbind(chapter_wordcounts, data.frame(
+#         Chapter = paste("Chapter", i),
+#         Words = count
+#       ))
+#     }
+
+#     ggplot(chapter_wordcounts, aes(area = Words, fill = Words, label = Chapter)) +
+#       geom_treemap(color = "white") +
+#       geom_treemap_text(colour = "black", place = "centre", reflow = TRUE) +
+#       scale_fill_gradient(low = "#AED6F1", high = "#1F618D") +
+#       labs(title = paste("Chapter Word Count Treemap (", edition, ")")) +
+#       theme_minimal()
+#   })
+  
+
+  
   observeEvent(input$run_treemap, {
+    # Clear and regenerate the treemap
     output$chapter_treemap <- renderPlot({
+      # Small delay to show clearing effect
+      Sys.sleep(0.1)
+      
       edition <- input$treemap_edition
       file_path <- paste0("infoviz/", edition, ".txt")
 
@@ -281,8 +366,11 @@ server <- function(input, output) {
     })
   }) #end treemap
   
-  # flow tab
+  # flow tab 
+  # Keep the button for manual refresh if needed
   observeEvent(input$run_flow, {
+  output$word_flow <- renderPlotly({
+    # This will automatically update when flow_edition or search_word changes
     edition <- input$flow_edition
     file_path <- paste0("infoviz/", edition, ".txt")
     search_term <- tolower(input$search_word)
@@ -311,29 +399,28 @@ server <- function(input, output) {
     df <- as.data.frame(table(Source = sources, Target = targets), stringsAsFactors = FALSE)
     df <- df[df$Freq > 0, ]
 
-    output$word_flow <- renderPlotly({
-      if (nrow(df) == 0) return(NULL)
+    if (nrow(df) == 0) return(NULL)
 
-      nodes <- data.frame(name = unique(c(df$Source, df$Target)), stringsAsFactors = FALSE)
-      df$IDsource <- match(df$Source, nodes$name) - 1
-      df$IDtarget <- match(df$Target, nodes$name) - 1
+    nodes <- data.frame(name = unique(c(df$Source, df$Target)), stringsAsFactors = FALSE)
+    df$IDsource <- match(df$Source, nodes$name) - 1
+    df$IDtarget <- match(df$Target, nodes$name) - 1
 
-      plot_ly(
-        type = "sankey",
-        orientation = "h",
-        node = list(
-          label = nodes$name,
-          pad = 15,
-          thickness = 20,
-          line = list(color = "black", width = 0.5)
-        ),
-        link = list(
-          source = df$IDsource,
-          target = df$IDtarget,
-          value = df$Freq
-        )
-      ) %>% layout(title = "Word Flow Around Search Term", font = list(size = 12))
-    })
+    plot_ly(
+      type = "sankey",
+      orientation = "h",
+      node = list(
+        label = nodes$name,
+        pad = 15,
+        thickness = 20,
+        line = list(color = "black", width = 0.5)
+      ),
+      link = list(
+        source = df$IDsource,
+        target = df$IDtarget,
+        value = df$Freq
+      )
+    ) %>% layout(title = "Word Flow Around Search Term", font = list(size = 12))
+  })
   })
   #end flow
 
