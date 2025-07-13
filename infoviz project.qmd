@@ -1,0 +1,582 @@
+---
+title: "Infoviz Project"
+author: "Elena Spirova"
+format: html
+editor: visual
+---
+
+## Calculation of word counts
+
+```{r}
+library(stringr)
+getwd()
+files <- list.files("infoviz", full.names = TRUE)
+
+for (file in files) {
+  if (file.exists(file)) {
+    text <- readLines(file, warn = FALSE)
+    word_count <- sum(str_count(text, "\\w+"))
+    print(paste(file, word_count, "words"))
+  } else {
+    print(paste("File missing:", file))
+  }
+}
+
+
+
+```
+
+## Prepare a structured dataset
+
+```{r}
+library(ggplot2)
+
+edition_data <- data.frame(
+  Edition = c(1813, 2002),
+  WordCount = c(123669, 122835)
+)
+
+ggplot(edition_data, aes(x = factor(Edition), y = WordCount, fill = factor(Edition))) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Word Count by Edition of Pride and Prejudice",
+    x = "Edition Year",
+    y = "Word Count"
+  ) +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Pastel1", name = "Edition")
+
+```
+
+## 
+
+```{r}
+library(shiny)
+library(ggplot2)
+library(plotly)
+library(stringr)
+library(dplyr)
+library(wordcloud2)
+library(treemapify)
+library(diffobj)
+
+edition_data <- data.frame(
+  Edition = c("1813", "2002"),
+  WordCount = c(123669, 122835)
+)
+
+extract_context_words <- function(text, search_term) {
+  words <- unlist(strsplit(tolower(text), "\\s+"))
+  before <- c()
+  after <- c()
+
+  for (i in seq_along(words)) {
+    if (words[i] == search_term) {
+      if (i > 1) before <- c(before, words[i - 1])
+      if (i < length(words)) after <- c(after, words[i + 1])
+    }
+  }
+
+  before_df <- as.data.frame(table(before), stringsAsFactors = FALSE)
+  after_df <- as.data.frame(table(after), stringsAsFactors = FALSE)
+
+  if (ncol(before_df) == 2) colnames(before_df) <- c("Word", "Freq")
+  if (ncol(after_df) == 2) colnames(after_df) <- c("Word", "Freq")
+
+  before_df <- before_df[order(-before_df$Freq), , drop = FALSE] #highest to lowest
+  after_df <- after_df[order(-after_df$Freq), , drop = FALSE]
+
+  before_df <- head(before_df, 10) # top ten
+  after_df <- head(after_df, 10) # top ten
+
+  list(before = before_df, after = after_df)
+}
+
+ui <- fluidPage(
+  titlePanel("Pride and Prejudice: Word Count Evolution"),
+
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("compare_editions", "Select Editions to Compare:",
+                  choices = edition_data$Edition,
+                  selected = c("1813", "2002"),
+                  multiple = TRUE),
+      selectInput("treemap_edition", "Treemap Edition:",
+                  choices = edition_data$Edition,
+                  selected = "1813"),
+      selectInput("flow_edition", "Edition for Word Flow:",
+                  choices = edition_data$Edition,
+                  selected = "1813"),
+      textInput("search_word", "Enter a word to search:", value = "Elizabeth"),
+      actionButton("run_search", "Search Word Count"),
+      actionButton("run_context", "Render Word Context"),
+      actionButton("run_cloud", "Render Word Cloud"),
+      actionButton("run_treemap", "Render Chapter Treemap"),
+      actionButton("run_flow", "Render Word Flow"),
+      actionButton("run_comparisson", "Compare Text"),
+      actionButton("analyze_chapter", "Analyze Selected Chapter"),
+      selectInput("comparisson_edition_1", "Select Edition 1 for Text Comparison:", choices = edition_data$Edition, selected = "1813"),
+      selectInput("comparisson_edition_2", "Select Edition 2 for Text Comparison:", choices = edition_data$Edition, selected = "2002"),
+      selectInput("start_chapter_1", "Start Chapter (Edition 1):", choices = 1:61),
+      selectInput("end_chapter_1", "End Chapter (Edition 1):", choices = 1:61),
+      selectInput("start_chapter_2", "Start Chapter (Edition 2):", choices = 1:61),
+      selectInput("end_chapter_2", "End Chapter (Edition 2):", choices = 1:61),
+      selectInput("analyze_edition", "Choose Edition for Chapter Analysis:",
+            choices = edition_data$Edition, selected = "1813"),
+      sliderInput("selected_chapters", "Select Chapter Range:",
+            min = 1, max = 61, value = c(1, 5), step = 1)
+
+
+    ),
+
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Word Count Evolution", plotlyOutput("wordcount_plot")),
+        tabPanel("Search Results", tableOutput("search_results")),
+        tabPanel("Word Context",
+          h4("Edition 1: Words Before and After Search Term"),
+          splitLayout(
+            plotlyOutput("before_plot_1"),
+            plotlyOutput("after_plot_1")
+          ),
+          h4("Edition 2: Words Before and After Search Term"),
+          splitLayout(
+            plotlyOutput("before_plot_2"),
+            plotlyOutput("after_plot_2")
+          )
+        ),
+              tabPanel("Compare Texts", 
+                 h4("Edition 1 Sample"), htmlOutput("sample_1"),
+                 h4("Edition 2 Sample"), htmlOutput("sample_2"),
+                 h4("Diff Between Editions"), uiOutput("diff_output")
+        ),
+         tabPanel("Word Cloud",
+          h4("Combined Word Cloud of Words Around Search Term"),
+          wordcloud2Output("word_cloud")
+        ),
+
+        tabPanel("Chapter Treemap",
+          h4("Treemap of Chapter Word Counts by Edition"),
+          plotOutput("chapter_treemap")
+        ),
+        tabPanel("Word Flow",
+          h4("Most Frequent Word Transitions Around Search Term"),
+          plotlyOutput("word_flow")
+        ),
+        tabPanel("Analyze Word per Chapter",
+          splitLayout(
+            plotlyOutput("start_words_plot"),
+            plotlyOutput("end_words_plot")
+          )
+        )
+      )
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  # word count tab
+  output$wordcount_plot <- renderPlotly({
+    data_to_plot <- edition_data[edition_data$Edition %in% input$compare_editions, ]
+    p <- ggplot(data_to_plot, aes(x = factor(Edition), y = WordCount, fill = factor(Edition))) +
+      geom_bar(stat = "identity") +
+      labs(title = "Word Count by Edition of Pride and Prejudice",
+           x = "Edition Year", y = "Word Count") +
+      theme_minimal() +
+      scale_fill_brewer(palette = "Pastel1", name = "Edition")
+    ggplotly(p, tooltip = "text")
+  }) # word count tab
+
+  # search results rab
+  output$search_results <- renderTable({
+    req(input$run_search)
+    search_term <- tolower(input$search_word)
+    results <- data.frame(Edition = character(), Count = numeric(), stringsAsFactors = FALSE)
+
+    for (edition in input$compare_editions) {
+      file_path <- paste0("infoviz/", edition, ".txt")
+      if (file.exists(file_path)) {
+        text <- tolower(paste(readLines(file_path, warn = FALSE), collapse = " "))
+        count <- str_count(text, paste0("\\b", search_term, "\\b"))
+        results <- rbind(results, data.frame(Edition = edition, Count = count))
+      }
+    }
+    results
+  }) # search results tab
+
+  # word cloud tab
+  combined_context <- reactiveVal(data.frame())
+
+  observeEvent(input$run_cloud, {
+    search_term <- tolower(input$search_word)
+    combined <- data.frame(Word = character(), Freq = numeric(), stringsAsFactors = FALSE)
+
+    for (idx in 1:2) {
+      edition <- input$compare_editions[idx]
+      file <- paste0("infoviz/", edition, ".txt")
+      start_chap <- as.numeric(input[[paste0("start_chapter_", idx)]])
+      end_chap <- as.numeric(input[[paste0("end_chapter_", idx)]])
+
+      if (file.exists(file)) {
+        lines <- readLines(file, warn = FALSE)
+        chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+
+        if (start_chap >= 1 && end_chap <= length(chapter_lines)) {
+          start_line <- chapter_lines[start_chap]
+          end_line <- if (end_chap < length(chapter_lines)) chapter_lines[end_chap + 1] - 1 else length(lines)
+          chapter_text <- paste(lines[start_line:end_line], collapse = " ")
+          result <- extract_context_words(chapter_text, search_term)
+
+          both <- rbind(result$before, result$after)
+          combined <- rbind(combined, both)
+        }
+      }
+    }
+
+    summarized <- combined %>% 
+      group_by(Word) %>% 
+      summarise(Freq = sum(Freq), .groups = 'drop') %>%
+      arrange(desc(Freq))
+    combined_context(summarized)
+  })
+  
+
+  output$word_cloud <- renderWordcloud2({
+    data <- combined_context()
+    if (nrow(data) == 0) return(NULL)
+    wordcloud2(data)
+  })
+# word cloud tab
+  
+# treemap rab  
+  observeEvent(input$run_treemap, {
+    output$chapter_treemap <- renderPlot({
+      edition <- input$treemap_edition
+      file_path <- paste0("infoviz/", edition, ".txt")
+
+      if (!file.exists(file_path)) return(NULL)
+
+      lines <- readLines(file_path, warn = FALSE)
+      chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+      chapter_wordcounts <- data.frame(Chapter = character(), Words = numeric(), stringsAsFactors = FALSE)
+
+      for (i in seq_along(chapter_lines)) {
+        start_line <- chapter_lines[i]
+        end_line <- if (i < length(chapter_lines)) chapter_lines[i + 1] - 1 else length(lines)
+        text <- paste(lines[start_line:end_line], collapse = " ")
+        count <- str_count(text, "\\w+")
+        chapter_wordcounts <- rbind(chapter_wordcounts, data.frame(
+          Chapter = paste("Chapter", i),
+          Words = count
+        ))
+      }
+
+      ggplot(chapter_wordcounts, aes(area = Words, fill = Words, label = Chapter)) +
+        geom_treemap(color = "white") +
+        geom_treemap_text(colour = "black", place = "centre", reflow = TRUE) +
+        scale_fill_gradient(low = "#AED6F1", high = "#1F618D") +
+        labs(title = paste("Chapter Word Count Treemap (", edition, ")")) +
+        theme_minimal()
+    })
+  }) #end treemap
+  
+  # flow tab
+  observeEvent(input$run_flow, {
+    edition <- input$flow_edition
+    file_path <- paste0("infoviz/", edition, ".txt")
+    search_term <- tolower(input$search_word)
+
+    if (!file.exists(file_path)) return(NULL)
+
+    lines <- readLines(file_path, warn = FALSE)
+    chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+    start_line <- chapter_lines[1]
+    end_line <- length(lines)
+    chapter_text <- paste(lines[start_line:end_line], collapse = " ")
+
+    words <- unlist(strsplit(tolower(chapter_text), "\\s+"))
+    sources <- c()
+    targets <- c()
+
+    for (i in seq_along(words)) {
+      if (words[i] == search_term) {
+        if (i > 1 && i < length(words)) {
+          sources <- c(sources, words[i - 1])
+          targets <- c(targets, words[i + 1])
+        }
+      }
+    }
+
+    df <- as.data.frame(table(Source = sources, Target = targets), stringsAsFactors = FALSE)
+    df <- df[df$Freq > 0, ]
+
+    output$word_flow <- renderPlotly({
+      if (nrow(df) == 0) return(NULL)
+
+      nodes <- data.frame(name = unique(c(df$Source, df$Target)), stringsAsFactors = FALSE)
+      df$IDsource <- match(df$Source, nodes$name) - 1
+      df$IDtarget <- match(df$Target, nodes$name) - 1
+
+      plot_ly(
+        type = "sankey",
+        orientation = "h",
+        node = list(
+          label = nodes$name,
+          pad = 15,
+          thickness = 20,
+          line = list(color = "black", width = 0.5)
+        ),
+        link = list(
+          source = df$IDsource,
+          target = df$IDtarget,
+          value = df$Freq
+        )
+      ) %>% layout(title = "Word Flow Around Search Term", font = list(size = 12))
+    })
+  })
+  #end flow
+
+  #comparisson tab
+   output$sample_1 <- renderUI({
+    start_chap <- as.numeric(input$start_chapter_1)
+    end_chap <- as.numeric(input$end_chapter_1)
+    file <- paste0("infoviz/", input$comparisson_edition_1, ".txt")
+    word <- tolower(input$search_word)
+
+    if (file.exists(file)) {
+      lines <- readLines(file, warn = FALSE)
+      chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+
+      if (start_chap <= end_chap && end_chap <= length(chapter_lines)) {
+        start_line <- chapter_lines[start_chap]
+        end_line <- if (end_chap < length(chapter_lines)) chapter_lines[end_chap + 1] - 1 else length(lines)
+        selected_text <- paste(lines[start_line:end_line], collapse = " ")
+
+        # Highlight the word
+        highlighted <- gsub(paste0("\\b(", word, ")\\b"), "<mark>\\1</mark>", selected_text, ignore.case = TRUE)
+        return(HTML(highlighted))
+      }
+    }
+    HTML("<i>No content found</i>")
+  })
+
+  output$sample_2 <- renderUI({
+    start_chap <- as.numeric(input$start_chapter_2)
+    end_chap <- as.numeric(input$end_chapter_2)
+    file <- paste0("infoviz/", input$comparisson_edition_2, ".txt")
+    word <- tolower(input$search_word)
+
+    if (file.exists(file)) {
+      lines <- readLines(file, warn = FALSE)
+      chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+
+      if (start_chap <= end_chap && end_chap <= length(chapter_lines)) {
+        start_line <- chapter_lines[start_chap]
+        end_line <- if (end_chap < length(chapter_lines)) chapter_lines[end_chap + 1] - 1 else length(lines)
+        selected_text <- paste(lines[start_line:end_line], collapse = " ")
+
+        # Highlight the word
+        highlighted <- gsub(paste0("\\b(", word, ")\\b"), "<mark>\\1</mark>", selected_text, ignore.case = TRUE)
+        return(HTML(highlighted))
+      }
+    }
+    HTML("<i>No content found</i>")
+  })
+
+  observeEvent(input$run_comparisson, {
+    edition1 <- input$comparisson_edition_1
+    edition2 <- input$comparisson_edition_2
+    word <- tolower(input$search_word)
+
+    file1 <- paste0("infoviz/", edition1, ".txt")
+    file2 <- paste0("infoviz/", edition2, ".txt")
+
+    if (file.exists(file1) && file.exists(file2)) {
+      lines1 <- readLines(file1, warn = FALSE)
+      lines2 <- readLines(file2, warn = FALSE)
+      chapters1 <- grep("^\\s*chapter\\s", lines1, ignore.case = TRUE)
+      chapters2 <- grep("^\\s*chapter\\s", lines2, ignore.case = TRUE)
+
+      start1 <- as.numeric(input$start_chapter_1)
+      end1 <- as.numeric(input$end_chapter_1)
+      start2 <- as.numeric(input$start_chapter_2)
+      end2 <- as.numeric(input$end_chapter_2)
+
+      if (start1 <= end1 && start2 <= end2) {
+        text1 <- paste(
+          lines1[chapters1[start1]:(if (end1 < length(chapters1)) chapters1[end1 + 1] - 1 else length(lines1))],
+          collapse = " "
+        )
+        text2 <- paste(
+          lines2[chapters2[start2]:(if (end2 < length(chapters2)) chapters2[end2 + 1] - 1 else length(lines2))],
+          collapse = " "
+        )
+output$diff_output <- renderUI({
+  tryCatch({
+    # Split texts into lines or sentences
+    lines1 <- unlist(strsplit(text1, "(?<=[.!?])\\s+", perl = TRUE))
+    lines2 <- unlist(strsplit(text2, "(?<=[.!?])\\s+", perl = TRUE))
+
+    # Trim whitespace
+    lines1 <- trimws(lines1)
+    lines2 <- trimws(lines2)
+
+    # Find additions and deletions
+    missing_from_2 <- setdiff(lines1, lines2)
+    added_in_2 <- setdiff(lines2, lines1)
+
+    # Color them for display
+    red_text <- paste0("<p style='color:red;'>- ", missing_from_2, "</p>")
+    green_text <- paste0("<p style='color:green;'>+ ", added_in_2, "</p>")
+
+    # Combine and return
+    HTML(paste(c(red_text), collapse = "\n"))
+  }, error = function(e) {
+    div(style = "color: red;", paste("Diff error:", e$message))
+  })
+})
+
+      }
+    }
+  }) # end comparisson
+
+  #context tab
+  for (i in 1:2) {
+    local({
+      idx <- i
+      output[[paste0("before_plot_", idx)]] <- renderPlotly({
+        req(input$run_context)
+        req(input$search_word)
+
+        edition <- input$compare_editions[idx]
+        file <- paste0("infoviz/", edition, ".txt")
+        search_term <- tolower(input$search_word)
+        start_chap <- as.numeric(input[[paste0("start_chapter_", idx)]])
+        end_chap <- as.numeric(input[[paste0("end_chapter_", idx)]])
+
+        if (file.exists(file)) {
+          lines <- readLines(file, warn = FALSE)
+          chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+          #print(chapter_lines)
+
+          if (start_chap >= 1 && end_chap <= length(chapter_lines)) {
+            start_line <- chapter_lines[start_chap]
+            end_line <- if (end_chap < length(chapter_lines)) chapter_lines[end_chap + 1] - 1 else length(lines)
+            chapter_text <- paste(lines[start_line:end_line], collapse = " ")
+            result <- extract_context_words(chapter_text, search_term)
+            if (nrow(result$before) == 0) return(NULL)
+
+            plot_ly(result$before,
+                    x = ~Freq,
+                    y = ~reorder(Word, Freq),
+                    type = "bar",
+                    orientation = "h",
+                    marker = list(color = ifelse(idx == 1, "#5DADE2", "#AF7AC5"))) %>%
+              layout(title = paste("Words Before (Edition", edition, ")"),
+                     xaxis = list(title = "Count"),
+                     yaxis = list(title = ""))
+          }
+        }
+      })
+
+      output[[paste0("after_plot_", idx)]] <- renderPlotly({
+        req(input$run_context)
+        req(input$search_word)
+
+        edition <- input$compare_editions[idx]
+        file <- paste0("infoviz/", edition, ".txt")
+        search_term <- tolower(input$search_word)
+        start_chap <- as.numeric(input[[paste0("start_chapter_", idx)]])
+        end_chap <- as.numeric(input[[paste0("end_chapter_", idx)]])
+
+        if (file.exists(file)) {
+          lines <- readLines(file, warn = FALSE)
+          chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+
+          if (start_chap >= 1 && end_chap <= length(chapter_lines)) {
+            start_line <- chapter_lines[start_chap]
+            end_line <- if (end_chap < length(chapter_lines)) chapter_lines[end_chap + 1] - 1 else length(lines)
+            chapter_text <- paste(lines[start_line:end_line], collapse = " ")
+            result <- extract_context_words(chapter_text, search_term)
+            if (nrow(result$after) == 0) return(NULL)
+
+            plot_ly(result$after,
+                    x = ~Freq,
+                    y = ~reorder(Word, Freq),
+                    type = "bar",
+                    orientation = "h",
+                    marker = list(color = ifelse(idx == 1, "#58D68D", "#F5B041"))) %>%
+              layout(title = paste("Words After (Edition", edition, ")"),
+                     xaxis = list(title = "Count"),
+                     yaxis = list(title = ""))
+          }
+        }
+      })
+    })
+  } # end context
+  
+ observeEvent(input$analyze_chapter, {
+  edition <- input$analyze_edition
+  chapter_range <- input$selected_chapters
+  file_path <- paste0("infoviz/", edition, ".txt")
+
+  if (!file.exists(file_path)) return(NULL)
+
+  lines <- readLines(file_path, warn = FALSE)
+  chapter_lines <- grep("^\\s*chapter\\s", lines, ignore.case = TRUE)
+
+  start_words <- c()
+  end_words <- c()
+
+  for (i in chapter_range[1]:chapter_range[2]) {
+    if (i > length(chapter_lines)) next
+
+    start_line <- chapter_lines[i]
+    end_line <- if (i < length(chapter_lines)) chapter_lines[i + 1] - 1 else length(lines)
+
+    chapter_text <- lines[start_line:end_line]
+    chapter_text <- tolower(paste(chapter_text, collapse = " "))
+    words <- unlist(strsplit(chapter_text, "\\s+"))
+    words <- words[grepl("\\w", words)]
+    words <- words[words != "chapter"]
+    words <- words[!grepl("^\\d+$", words)]  # cannot be numbers
+
+
+    if (length(words) >= 2) {
+      start_words <- c(start_words, words[1])
+      end_words <- c(end_words, tail(words, 1))
+    }
+  }
+
+  # Prepare top start word frequencies
+  start_df <- as.data.frame(table(start_words), stringsAsFactors = FALSE)
+  colnames(start_df) <- c("Word", "Freq")
+  start_df <- start_df %>% arrange(desc(Freq)) %>% head(10)
+
+  # Prepare top end word frequencies
+  end_df <- as.data.frame(table(end_words), stringsAsFactors = FALSE)
+  colnames(end_df) <- c("Word", "Freq")
+  end_df <- end_df %>% arrange(desc(Freq)) %>% head(10)
+
+  # Render pie charts
+  output$start_words_plot <- renderPlotly({
+    plot_ly(start_df, labels = ~Word, values = ~Freq, type = 'pie',
+            textinfo = 'label+percent', insidetextorientation = 'radial') %>%
+      layout(title = paste("Top Start Words (Chapters", chapter_range[1], "-", chapter_range[2], "Edition", edition, ")"))
+  })
+
+  output$end_words_plot <- renderPlotly({
+    plot_ly(end_df, labels = ~Word, values = ~Freq, type = 'pie',
+            textinfo = 'label+percent', insidetextorientation = 'radial') %>%
+      layout(title = paste("Top End Words (Chapters", chapter_range[1], "-", chapter_range[2], "Edition", edition, ")"))
+  })
+})
+ 
+}
+
+shinyApp(ui = ui, server = server)
+
+
+
+```
