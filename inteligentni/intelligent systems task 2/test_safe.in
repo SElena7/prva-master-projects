@@ -1,0 +1,16 @@
+formulas(assumptions).
+    % If a cell has no breeze, all adjacent cells are safe
+    all X,Y ( not Breeze(X,Y) -> 
+              all NX,NY ( Adjacent(X,Y,NX,NY) -> Safe(NX,NY) ) ).
+
+    % Adjacent relations (sample)
+    Adjacent(1,1,1,2).
+    Adjacent(1,1,2,1).
+
+    % Current perceptions
+    not Breeze(1,1).
+end_of_list.
+
+formulas(goals).
+    Safe(1,2).
+end_of_list.
